@@ -12,7 +12,10 @@ from config.settings import DEFAULT_TRADE_SIZE_USD
 from exchanges.dex.base_dex import DEXPrice
 from exchanges.dex.uniswap_v2 import UniswapV2DEX, create_dex_instances
 from exchanges.dex.uniswap_v3 import UniswapV3DEX, create_v3_instances
+from exchanges.dex.curve import CurveDEX, create_curve_instances
 from utils.logger import get_logger
+from core.network.multicall import Multicall
+from utils.rpc_manager import rpc_manager
 
 logger = get_logger(__name__)
 
@@ -50,6 +53,7 @@ class DEXAggregator:
     def __init__(self):
         self._v2_dexs: list[UniswapV2DEX] = []
         self._v3_dexs: list[UniswapV3DEX] = []
+        self._curve_dexs: list[CurveDEX] = []
         self._initialized = False
         self._semaphore = asyncio.Semaphore(25)  # Lower concurrency to prevent RPC timeouts
     
@@ -60,8 +64,9 @@ class DEXAggregator:
         
         self._v2_dexs = create_dex_instances()
         self._v3_dexs = create_v3_instances()
+        self._curve_dexs = create_curve_instances()
         
-        logger.info(f"[bold green]DEX Aggregator ready: {len(self._v2_dexs)} V2 DEXs, {len(self._v3_dexs)} V3 DEXs[/bold green]")
+        logger.info(f"[bold green]DEX Aggregator ready: {len(self._v2_dexs)} V2, {len(self._v3_dexs)} V3, {len(self._curve_dexs)} Curve[/bold green]")
         self._initialized = True
     
     def _get_token_pair_for_chain(
@@ -234,34 +239,105 @@ class DEXAggregator:
         pairs: list[tuple[str, str]]
     ) -> dict[str, list[DEXQuote]]:
         """
-        Fetch prices for all pairs from all DEXs
-        Returns dict: normalized_symbol -> list of quotes
+        Fetch prices for all pairs from all DEXs using Multicall batching.
+        Drastically reduces RPC calls/sec while maximizing throughput.
         """
         if not self._initialized:
             await self.initialize()
         
         results: dict[str, list[DEXQuote]] = {}
-        tasks = []
-        task_info = []
+        all_dexs = self._v2_dexs + self._v3_dexs + self._curve_dexs
         
-        all_dexs = self._v2_dexs + self._v3_dexs
-        
-        for base, quote in pairs:
-            normalized = f"{normalize_symbol(base)}/{normalize_symbol(quote)}"
-            if normalized not in results:
-                results[normalized] = []
+        # Group DEXs by chain
+        dexs_by_chain: dict[ChainId, list] = {}
+        for dex in all_dexs:
+            if dex.chain_id not in dexs_by_chain:
+                dexs_by_chain[dex.chain_id] = []
+            dexs_by_chain[dex.chain_id].append(dex)
             
-            for dex in all_dexs:
-                tasks.append(self.get_price(base, quote, dex.chain_id, dex))
-                task_info.append(normalized)
-        
-        # Execute all fetches concurrently
-        quotes = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Organize results
-        for i, quote in enumerate(quotes):
-            if isinstance(quote, DEXQuote):
-                results[task_info[i]].append(quote)
+        async def process_chain(chain_id: ChainId, dexs: list):
+            try:
+                web3 = await rpc_manager.get_web3(chain_id)
+                multicall = Multicall(web3)
+                
+                batch_calls = []
+                # (base_addr, quote_addr, dex, sub_idx, amount, norm_symbol)
+                batch_meta = [] 
+                BATCH_SIZE = 200 # Conservative batch size
+                
+                async def execute_batch(current_calls, current_meta):
+                    if not current_calls: return
+                    try:
+                        raw_results = await multicall.aggregate(current_calls)
+                        for j, res in enumerate(raw_results):
+                            if res:
+                                b_addr, q_addr, d, idx, amt, norm = current_meta[j]
+                                price = d.process_multicall_result(res, b_addr, q_addr, amt, idx)
+                                if price:
+                                    # Convert DEXPrice to DEXQuote (normalize timestamp etc)
+                                    quote = DEXQuote(
+                                        dex_name=price.dex_name,
+                                        chain=price.chain,
+                                        chain_name=price.chain.name,
+                                        base_symbol=price.symbol.split('/')[0], # Rough parsing
+                                        quote_symbol=price.symbol.split('/')[1],
+                                        bid=price.effective_price, # Use effective price (post fee)
+                                        ask=price.effective_price * (1 + 0.001), # Add slight spread for ask?
+                                        fee_percent=price.fee_percent,
+                                        timestamp=time.time()
+                                    )
+                                    if norm not in results:
+                                        results[norm] = []
+                                    results[norm].append(quote)
+                    except Exception as e:
+                        logger.debug(f"Batch execution failed on {chain_id.name}: {e}")
+
+                for base, quote in pairs:
+                    tokens = self._get_token_pair_for_chain(chain_id, base, quote)
+                    if not tokens: continue
+                    
+                    base_token, quote_token = tokens
+                    base_addr = base_token.get_address(chain_id)
+                    quote_addr = quote_token.get_address(chain_id)
+                    
+                    # Calculate Amount
+                    decimals = base_token.get_decimals(chain_id)
+                    try:
+                        price_est = base_token.approx_price_usd or 0
+                        if price_est > 0:
+                            target_amount = DEFAULT_TRADE_SIZE_USD / price_est
+                        else:
+                            target_amount = 1.0
+                    except:
+                        target_amount = 1.0
+                        
+                    if target_amount < 0.000001: target_amount = 0.000001
+                    amount_in = int(target_amount * (10 ** decimals))
+                    if amount_in == 0: amount_in = 10**decimals
+                    
+                    normalized = f"{normalize_symbol(base)}/{normalize_symbol(quote)}"
+                    
+                    for dex in dexs:
+                        calls = dex.get_price_call_data(base_addr, quote_addr, amount_in)
+                        for i, call in enumerate(calls):
+                            batch_calls.append(call)
+                            batch_meta.append((base_addr, quote_addr, dex, i, amount_in, normalized))
+                            
+                            if len(batch_calls) >= BATCH_SIZE:
+                                await execute_batch(batch_calls, batch_meta)
+                                batch_calls = []
+                                batch_meta = []
+                
+                # Final batch
+                if batch_calls:
+                    await execute_batch(batch_calls, batch_meta)
+                    
+            except Exception as e:
+                logger.error(f"Multicall chain process failed {chain_id.name}: {e}")
+
+        # Run all chains
+        tasks = [process_chain(cid, dlist) for cid, dlist in dexs_by_chain.items()]
+        await asyncio.gather(*tasks)
         
         return results
     

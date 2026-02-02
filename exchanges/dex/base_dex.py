@@ -3,9 +3,10 @@ Base DEX class for all DEX implementations
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 
 from config.chains import ChainId
+from core.network.multicall import Call
 
 
 @dataclass
@@ -64,6 +65,19 @@ class BaseDEX(ABC):
         
         Returns:
             Tuple of (reserve_a, reserve_b) or None if pool doesn't exist
+        """
+        pass
+    
+    @abstractmethod
+    def get_price_call_data(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int
+    ) -> list[Call]:
+        """
+        Get the Multicall data for a price check.
+        Does NOT execute network request.
         """
         pass
 

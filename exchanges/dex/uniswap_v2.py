@@ -2,7 +2,7 @@
 Uniswap V2 style DEX implementation
 Works for: Uniswap V2, SushiSwap, PancakeSwap V2, QuickSwap, Camelot, and more
 """
-from typing import Optional
+from typing import Optional, Any
 from web3 import AsyncWeb3
 
 from config.chains import ChainId, CHAINS
@@ -14,6 +14,7 @@ from exchanges.dex.base_dex import (
 from utils.rpc_manager import rpc_manager
 from utils.rate_limiter import rate_limiter
 from utils.logger import get_logger
+from core.network.multicall import Call
 
 logger = get_logger(__name__)
 
@@ -181,6 +182,102 @@ class UniswapV2DEX(BaseDEX):
             if token_addr and token_addr.lower() == address_lower:
                 return token.symbol
         return address[:8] + "..."
+
+    def get_price_call_data(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int
+    ) -> list[Call]:
+        """Get call data for multicall"""
+        try:
+            # We need the Web3 instance to checksum addresses, but this method shouldn't be async
+            # So we assume addresses are valid or handle normalization later?
+            # Ideally we check correct format here.
+            token_in = AsyncWeb3.to_checksum_address(token_in)
+            token_out = AsyncWeb3.to_checksum_address(token_out)
+            
+            # Encode call data manually or use contract helper if available sync?
+            # Web3.py contract functions usually require an instance.
+            # We can construct the calldata manually using ABI encoding.
+            # getAmountsOut(uint256 amountIn, address[] path)
+            
+            # Selector for getAmountsOut: 0xd06ca61f
+            # But relying on web3 contract encodeABI is safer.
+            
+            # Since we can't easily get the contract instance synchronously without async init,
+            # we'll do a lightweight encoding manually or accept that we need to init first.
+            # BUT: This method is called by aggregator which manages init.
+            
+            if not self._router_contract:
+                return [] # Interface restriction: must be governed by aggregator
+                
+            path = [token_in, token_out]
+            call_data = self._router_contract.encodeABI(
+                fn_name="getAmountsOut",
+                args=[amount_in, path]
+            )
+            
+            return [Call(
+                target=self.router_address,
+                allow_failure=True,
+                call_data=bytes.fromhex(call_data[2:]), # remove 0x prefix
+                output_types=['uint256[]']
+            )]
+        except Exception as e:
+            logger.error(f"Failed to encode call data: {e}")
+            return []
+
+    def process_multicall_result(
+        self,
+        result: Any,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        call_index: int = 0
+    ) -> Optional[DEXPrice]:
+        """Process V2 result (amounts array)"""
+        try:
+            # result is [amounts[]] due to tuple return type decoding
+            # Actually, decode in multicall.py returns the decoded tuple.
+            # output_types=['uint256[]'] -> result is ([amountIn, amountOut],)
+            # wait, eth_abi.decode returns a tuple.
+            # For ['uint256[]'], it returns ([123, 456],)
+            
+            if not result or len(result) == 0:
+                return None
+            
+            # The result from Multicall3 wrapper is typically the inner value if single return
+            # But let's be careful. My Multicall wrapper unwraps single values.
+            # If output_types=['uint256[]'], result is [123, 456] (list of int)
+            
+            amounts = result
+            if isinstance(result, tuple):
+                 amounts = result[0]
+            
+            if not isinstance(amounts, list) or len(amounts) < 2:
+                 return None
+
+            amount_out = amounts[1]
+            if amount_out == 0:
+                return None
+                
+            price = amount_out / amount_in
+            
+            token_in_symbol = self._get_token_symbol(token_in)
+            token_out_symbol = self._get_token_symbol(token_out)
+            
+            return DEXPrice(
+                dex_name=self.name,
+                chain=self.chain_id,
+                symbol=f"{token_in_symbol}/{token_out_symbol}",
+                token_in=token_in,
+                token_out=token_out,
+                price=price,
+                fee_percent=self.fee_percent
+            )
+        except Exception:
+            return None
 
 
 def create_dex_instances() -> list[UniswapV2DEX]:

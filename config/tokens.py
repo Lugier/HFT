@@ -636,6 +636,94 @@ CBETH = Token(
 )
 
 
+
+# ==================== L2 DEFI & ECOSYSTEM ====================
+
+GMX = Token(
+    symbol="GMX",
+    name="GMX",
+    decimals=18,
+    approx_price_usd=40.0,
+    addresses={
+        ChainId.ARBITRUM: "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
+        ChainId.AVALANCHE: "0x62edc0692BD09778Df15df95CA099147311C6339",
+    }
+)
+
+MAGIC = Token(
+    symbol="MAGIC",
+    name="Magic",
+    decimals=18,
+    addresses={
+        ChainId.ARBITRUM: "0x539bdE0d7Dbd33f84E6C96485d5940F3E377505C",
+        ChainId.ETHEREUM: "0xb0c7a3Ba49C7a6EAbA6df4a90C4749507a5DE487",
+    }
+)
+
+RDNT = Token(
+    symbol="RDNT",
+    name="Radiant Capital",
+    decimals=18,
+    addresses={
+        ChainId.ARBITRUM: "0x3082CC23568eA640225c2467653dB90e9250AaA0",
+        ChainId.BSC: "0xf7DE7E8A6bd59ED41a4b5fe50278b3B7f31384dF",
+    }
+)
+
+GNS = Token(
+    symbol="GNS",
+    name="Gains Network",
+    decimals=18,
+    addresses={
+        ChainId.ARBITRUM: "0x18c11FD286C5EC11c3b683Caa81dcd9238466cDb",
+        ChainId.POLYGON: "0xE5417Af564e4bFDA1c483642db72007871397896",
+    }
+)
+
+# ==================== REAL WORLD ASSETS (RWA) ====================
+
+ONDO = Token(
+    symbol="ONDO",
+    name="Ondo",
+    decimals=18,
+    approx_price_usd=0.8,
+    addresses={
+        ChainId.ETHEREUM: "0xfAbA6f8e4a5E8Ab829bb19934e760b6065f72401",
+        ChainId.BASE: "0x0000000000000000000000000000000000000000",
+    }
+)
+
+# ==================== NEW STABLES ====================
+
+USDe = Token(
+    symbol="USDe",
+    name="Ethena USDe",
+    decimals=18,
+    addresses={
+        ChainId.ETHEREUM: "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
+        ChainId.BASE: "0x5d3a536e4d6dbd6114cc1ead35777bab948e3643",
+    }
+)
+
+# ==================== SOLANA BRIDGED ====================
+
+SOL = Token(
+    symbol="SOL",
+    name="Wrapped SOL",
+    decimals=9,
+    approx_price_usd=150.0,
+    addresses={
+        ChainId.BSC: "0x570A5D26f7765Ecb712C0924E4De545B89fD43dF", # Binance-peg
+        ChainId.ETHEREUM: "0xD31a59c85aE9D8edEFe41849d8aF455Ef8C94197", # Wormhole
+        ChainId.POLYGON: "0xd93f7E271cB87c23AaA73edC008A79646d1F9912", # Wormhole
+        ChainId.ARBITRUM: "0x2bcC6D6CdBbDC0a4071e48bb3f9fb2722000F435", # Wormhole
+    },
+    chain_decimals={
+        ChainId.BSC: 18,
+    }
+)
+
+
 # All tokens list
 ALL_TOKENS: list[Token] = [
     # Stablecoins
@@ -660,6 +748,8 @@ ALL_TOKENS: list[Token] = [
     STETH, RETH, CBETH,
     # New Chains
     WCRO, WGLMR, WCELO, WKAVA, ATOM, DOT,
+    # New Expansion
+    GMX, MAGIC, RDNT, GNS, ONDO, USDe, SOL,
 ]
 
 # Expanded trading pairs (base/quote)
@@ -725,6 +815,17 @@ TRADING_PAIRS: list[tuple[str, str]] = [
     ("ETH", "BTC"),
     ("BNB", "ETH"),
     ("LINK", "BTC"),
+    ("SOL", "USDT"), ("SOL", "ETH"), ("SOL", "USDC"),
+    
+    # New L2 pairs
+    ("GMX", "USDT"), ("GMX", "ETH"), ("GMX", "USDC"),
+    ("MAGIC", "USDT"), ("MAGIC", "ETH"),
+    ("RDNT", "USDT"), ("RDNT", "ETH"),
+    ("GNS", "USDT"), ("GNS", "ETH"), ("GNS", "DAI"),
+    
+    # RWA / New Stables
+    ("ONDO", "USDT"), ("ONDO", "ETH"),
+    ("USDe", "USDT"), ("USDe", "USDC"), ("USDe", "DAI"),
 ]
 
 # CEX symbol mapping (normalize symbols)

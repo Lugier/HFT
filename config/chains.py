@@ -5,6 +5,13 @@ Expanded to include 10+ chains
 from dataclasses import dataclass, field
 from typing import Final
 from enum import Enum
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+INFURA_KEY = os.getenv("INFURA_API_KEY")
+
 
 
 class ChainId(Enum):
@@ -42,8 +49,9 @@ class ChainConfig:
     dex_routers: dict[str, str] = field(default_factory=dict)
     
     def get_rpc(self, index: int = 0) -> str:
-        """Get RPC endpoint with rotation support"""
-        return self.rpc_endpoints[index % len(self.rpc_endpoints)]
+        """Get RPC endpoint with rotation support, filtering None"""
+        valid_rpcs = [r for r in self.rpc_endpoints if r is not None]
+        return valid_rpcs[index % len(valid_rpcs)]
 
 
 # Chain configurations with multiple free RPC endpoints for failover
@@ -54,6 +62,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="ETH",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://eth.llamarpc.com",
             "https://rpc.ankr.com/eth",
             "https://ethereum.publicnode.com",
@@ -99,6 +108,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="MATIC",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://polygon-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://polygon-rpc.com",
             "https://rpc.ankr.com/polygon",
             "https://polygon.publicnode.com",
@@ -120,6 +130,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="ETH",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://arbitrum-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://arb1.arbitrum.io/rpc",
             "https://rpc.ankr.com/arbitrum",
             "https://arbitrum.publicnode.com",
@@ -141,6 +152,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="ETH",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://optimism-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://mainnet.optimism.io",
             "https://rpc.ankr.com/optimism",
             "https://optimism.publicnode.com",
@@ -160,6 +172,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="AVAX",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://avalanche-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://api.avax.network/ext/bc/C/rpc",
             "https://rpc.ankr.com/avalanche",
             "https://avalanche.publicnode.com",
@@ -198,6 +211,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="ETH",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://base-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://mainnet.base.org",
             "https://rpc.ankr.com/base",
             "https://base.publicnode.com",
@@ -236,6 +250,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="ETH",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://linea-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://rpc.linea.build",
             "https://linea.drpc.org",
         ],
@@ -322,6 +337,7 @@ CHAINS: dict[ChainId, ChainConfig] = {
         native_token="CELO",
         native_decimals=18,
         rpc_endpoints=[
+            f"https://celo-mainnet.infura.io/v3/{INFURA_KEY}" if INFURA_KEY else None,
             "https://forno.celo.org",
             "https://rpc.ankr.com/celo",
         ],

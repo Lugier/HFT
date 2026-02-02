@@ -172,7 +172,7 @@ class RPCManager:
     async def get_web3(self, chain_id: ChainId) -> AsyncWeb3:
         """Get a Web3 instance for the best available endpoint"""
         url = self._get_best_endpoint(chain_id)
-        return self._get_web3(chain_id, url)
+        return await self._get_web3(chain_id, url)
     
     async def get_gas_price(self, chain_id: ChainId) -> int:
         """Get current gas price for a chain"""
