@@ -22,7 +22,7 @@ class WSPrice:
     bid: float
     ask: float
     timestamp: float
-    seq: int = 0 # Sequence number for HFT tracking
+    seq: int = 0
 
 class CCXTProFetcher:
     """
@@ -38,17 +38,24 @@ class CCXTProFetcher:
 
     async def initialize(self):
         """Initialize WebSocket connections"""
+        # Top-tier exchanges with reliable WebSocket support
+        WS_SUPPORTED = [
+            "binance", "bybit", "okx", "gateio", "kucoin", 
+            "mexc", "kraken", "whitebit", "bitget", "htx", 
+            "phemex", "bitmart", "lbank"
+        ]
+        
         for config in EXCHANGES:
-            # Note: Only a subset of exchanges might be needed for high-speed
-            # Limit to top-tier for best stability in WS
-            if config.id in ["binance", "bybit", "okx", "gateio", "kucoin"]:
+            if config.id in WS_SUPPORTED:
                 try:
                     session = await get_global_session()
                     exchange_class = getattr(ccxt, config.id)
+                    # CCXT Pro exchanges
                     self._exchanges[config.id] = exchange_class({
                         'enableRateLimit': True,
                         'options': {'defaultType': 'spot'},
-                        'session': session
+                        'session': session,
+                        'newUpdates': True
                     })
                     self._latest_prices[config.id] = {}
                     logger.info(f"Initialized WebSocket for {config.name}")
@@ -59,24 +66,45 @@ class CCXTProFetcher:
         """Continuous loop to watch tickers via WebSocket"""
         exchange = self._exchanges[exchange_id]
         
-        # Map normalized symbols to exchange specific symbols
-        # For simplicity, we assume standard CCXT symbols for now
-        # In production, use the same mapping logic as in ccxt_fetcher.py
+        # Pre-filter symbols that exist in market
+        valid_symbols = []
+        for s in symbols:
+            if s in exchange.markets:
+                valid_symbols.append(s)
+            else:
+                # Try common variations
+                parts = s.split('/')
+                if len(parts) == 2:
+                    vars = [f"{parts[0]}{parts[1]}", f"{parts[0]}-{parts[1]}"]
+                    for var in vars:
+                        if var in exchange.markets:
+                            valid_symbols.append(var)
+                            break
         
+        if not valid_symbols:
+            return
+
+        # Optimization: Limit symbols per connection if needed
+        # CCXT Pro handles many, but let's be safe.
+        max_symbols = 250
+        hot_symbols = valid_symbols[:max_symbols]
+
         while self._running:
             try:
-                # CCXT Pro watchTickers returns updates as they happen
-                tickers = await exchange.watch_tickers(symbols)
+                # watch_tickers returns a dict of all symbols that updated
+                tickers = await exchange.watch_tickers(hot_symbols)
                 
                 for symbol, ticker in tickers.items():
                     bid = ticker.get('bid')
                     ask = ticker.get('ask')
                     
-                    # Skip if bid/ask are None or 0
                     if not bid or not ask or bid <= 0 or ask <= 0:
                         continue
                         
-                    norm_symbol = symbol # Ideally map back to "ETH/USDT"
+                    # Normalize back for internal pricing matrix
+                    norm_symbol = symbol
+                    if symbol in exchange.markets:
+                        norm_symbol = exchange.markets[symbol].get('symbol', symbol)
                     
                     self._latest_prices[exchange_id][norm_symbol] = WSPrice(
                         exchange=exchange_id,
@@ -85,19 +113,23 @@ class CCXTProFetcher:
                         ask=float(ask),
                         timestamp=ticker['timestamp'] / 1000.0 if ticker.get('timestamp') else datetime.now().timestamp()
                     )
-            except Exception as e:
-                logger.debug(f"WS Error on {exchange_id}: {e}")
-                await asyncio.sleep(5) # Backoff on error
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(5) 
 
-    async def start(self):
+    async def start(self, symbols: Optional[List[str]] = None):
         """Start all WebSocket streams"""
+        if self._running:
+            return
+            
         self._running = True
         
-        for exchange_id in self._exchanges:
-            # Filter trading pairs for this exchange
+        # Default to TRADING_PAIRS if no symbols provided
+        if not symbols:
             symbols = [f"{normalize_symbol(b)}/{normalize_symbol(q)}" for b, q in TRADING_PAIRS]
-            
-            # Start a dedicated task for this exchange
+        
+        for exchange_id in self._exchanges:
             task = asyncio.create_task(self._watch_exchange_tickers(exchange_id, symbols))
             self._tasks.append(task)
             
@@ -109,8 +141,16 @@ class CCXTProFetcher:
         for task in self._tasks:
             task.cancel()
         
+        # Wait for tasks to finish
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks = []
+            
         for exchange in self._exchanges.values():
-            await exchange.close()
+            try:
+                await exchange.close()
+            except:
+                pass
         
         logger.info("WebSocket streams stopped")
 

@@ -328,6 +328,38 @@ class CCXTFetcher:
             return []
         return list(self._exchanges[exchange_id].markets.keys())
 
+    def harvest_all_markets(self, min_exchanges: int = 2) -> list[tuple[str, str]]:
+        """
+        Discover all pairs that exist on at least `min_exchanges`
+        Returns list of (base, quote) tuples
+        """
+        all_markets: dict[str, int] = {}
+        pair_data: dict[str, tuple[str, str]] = {}
+        
+        for exchange_id, exchange in self._exchanges.items():
+            for symbol, market in exchange.markets.items():
+                if '/' not in symbol: continue
+                # Normalize symbol to BASE/QUOTE format if not already
+                base = market.get('base')
+                quote = market.get('quote')
+                if not base or not quote: continue
+                
+                # Only care about stable or major quotes to avoid garbage
+                if quote not in ["USDT", "USDC", "DAI", "BTC", "ETH"]:
+                    continue
+                
+                norm_symbol = f"{base}/{quote}"
+                all_markets[norm_symbol] = all_markets.get(norm_symbol, 0) + 1
+                pair_data[norm_symbol] = (base, quote)
+        
+        discovered = []
+        for symbol, count in all_markets.items():
+            if count >= min_exchanges:
+                discovered.append(pair_data[symbol])
+                
+        logger.info(f"Discovered {len(discovered)} common pairs across CEXs")
+        return discovered
+
 
 # Global instance
 cex_fetcher = CCXTFetcher()

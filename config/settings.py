@@ -14,7 +14,7 @@ DEFAULT_TRADE_SIZE_USD: Final[float] = 1000.0
 MAX_SLIPPAGE: Final[float] = 0.01
 
 # Scan interval in seconds
-SCAN_INTERVAL_SECONDS: Final[float] = 3.0
+SCAN_INTERVAL_SECONDS: Final[float] = 0.5
 
 # Request timeout in seconds
 REQUEST_TIMEOUT: Final[float] = 10.0

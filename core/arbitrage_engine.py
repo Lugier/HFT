@@ -14,6 +14,7 @@ from exchanges.cex.ccxt_fetcher import cex_fetcher, CEXPrice
 from exchanges.cex.ws_fetcher import ws_fetcher
 from exchanges.dex.aggregator import dex_aggregator, DEXQuote
 from core.gas_estimator import gas_estimator, GasEstimate
+from core.strategies.triangular import triangular_strategy
 from config.fees import get_withdrawal_fee
 from utils.logger import get_logger
 
@@ -80,6 +81,9 @@ class ArbitrageEngine:
         self._last_scan_time: Optional[datetime] = None
         self._total_pairs_checked = 0
         self._opportunities: list[ArbitrageOpportunity] = []
+        self._triangular_opps = [] # New list for triangular
+        self._discovered_pairs: list[tuple[str, str]] = []
+        self._last_harvest_time: float = 0
     
     async def initialize(self):
         """Initialize all price fetchers"""
@@ -88,9 +92,17 @@ class ArbitrageEngine:
         # Initialize CEX fetcher (REST)
         await cex_fetcher.initialize()
         
-        # Initialize WS fetcher (Real-time)
+        # DYNAMIC HARVESTING: ID all liquid markets before starting WS
+        logger.info("[yellow]Performing initial market harvest...[/yellow]")
+        top_pairs = cex_fetcher.harvest_all_markets(min_exchanges=2)
+        self._discovered_pairs = list(set(top_pairs + TRADING_PAIRS))
+        self._last_harvest_time = datetime.now().timestamp()
+        
+        # Initialize WS fetcher (Real-time) with discovered symbols
         await ws_fetcher.initialize()
-        await ws_fetcher.start()
+        ws_symbols = [f"{normalize_symbol(b)}/{normalize_symbol(q)}" for b, q in self._discovered_pairs]
+        # Only watch top 500 pairs via WS to avoid overwhelming connections
+        await ws_fetcher.start(ws_symbols[:500])
         
         # Initialize DEX aggregator
         await dex_aggregator.initialize()
@@ -378,26 +390,35 @@ class ArbitrageEngine:
         """
         scan_start = datetime.now()
         
-        # 1. IDENTIFY WS EXCHANGES
+        # 1. DYNAMIC HARVESTING (Every 10 minutes or first run)
+        now_ts = datetime.now().timestamp()
+        if not self._discovered_pairs or now_ts - self._last_harvest_time > 600:
+            logger.info("Harvesting all liquid markets dynamically...")
+            cex_pairs = cex_fetcher.harvest_all_markets(min_exchanges=2)
+            
+            # Combine with hardcoded ones to ensure we don't miss core tokens
+            combined = list(set(cex_pairs + TRADING_PAIRS))
+            self._discovered_pairs = combined
+            self._last_harvest_time = now_ts
+            logger.info(f"Scanning {len(self._discovered_pairs)} unique pairs across all markets")
+
+        # 2. IDENTIFY WS EXCHANGES
         ws_active_exchanges = list(ws_fetcher._exchanges.keys())
         
-        # 2. FETCH REST PRICES (Excluding WS exchanges)
-        # This will be much faster now as it skips the heavy hitters (Binance etc.)
-        cex_task = cex_fetcher.fetch_all_prices(TRADING_PAIRS, exclude_exchanges=ws_active_exchanges)
-        
-        # 2b. DYNAMICALLY GENERATE DEX PAIRS
-        # Map CEX symbols (ETH) back to DEX symbols (WETH)
-        from config.tokens import CEX_SYMBOL_MAP
-        dex_reverse_map = {v: k for k, v in CEX_SYMBOL_MAP.items()}
-        
+        # 3. FETCH REST + DEX + GAS
+        # Optimization: Fetch DEX only for pairs that have Token mappings
+        # To avoid giant multicalls for assets we don't have addresses for
         dex_pairs = []
-        for base, quote in TRADING_PAIRS:
-            # Map CEX base -> DEX base (e.g. ETH -> WETH)
-            dex_base = dex_reverse_map.get(base, base)
-            # Map CEX quote -> DEX quote (e.g. USDT -> USDT)
-            dex_quote = dex_reverse_map.get(quote, quote)
-            dex_pairs.append((dex_base, dex_quote))
+        from config.tokens import ALL_TOKENS, normalize_symbol
+        # Build token symbol map for speed
+        token_map = {t.symbol: t for t in ALL_TOKENS}
         
+        for base, quote in self._discovered_pairs:
+            # Check if we have both tokens in our DEX config
+            if base in token_map and quote in token_map:
+                dex_pairs.append((base, quote))
+
+        cex_task = cex_fetcher.fetch_all_prices(self._discovered_pairs, exclude_exchanges=ws_active_exchanges)
         dex_task = dex_aggregator.fetch_all_prices(dex_pairs)
         gas_task = gas_estimator.get_all_gas_estimates()
         
@@ -405,23 +426,21 @@ class ArbitrageEngine:
             cex_task, dex_task, gas_task
         )
         
-        # 3. MERGE WS PRICES INTO CEX PRICES
-        # Inject the ultra-low latency WS prices into the result set
+        # 4. MERGE WS PRICES
         for exchange_id in ws_active_exchanges:
-            for base, quote in TRADING_PAIRS:
+            for base, quote in self._discovered_pairs:
                 norm_symbol = f"{normalize_symbol(base)}/{normalize_symbol(quote)}"
                 ws_price = ws_fetcher.get_latest_price(exchange_id, norm_symbol)
                 
                 if ws_price and ws_price.bid > 0:
-                    # Convert WSPrice to CEXPrice
                     cex_p = CEXPrice(
                         exchange=exchange_id,
                         symbol=norm_symbol,
                         bid=ws_price.bid,
                         ask=ws_price.ask,
                         mid=(ws_price.bid + ws_price.ask) / 2,
-                        timestamp=int(ws_price.timestamp * 1000), # Back to ms for consistency
-                        volume_24h=None # WS often doesn't stream 24h vol, but arb engine handles None
+                        timestamp=int(ws_price.timestamp * 1000),
+                        volume_24h=None
                     )
                     
                     if norm_symbol not in cex_prices:
@@ -436,6 +455,13 @@ class ArbitrageEngine:
         # Build price matrix
         price_matrix = self._build_price_matrix(cex_prices, dex_prices)
         
+        # 5. FIND TRIANGULAR OPPORTUNITIES
+        self._triangular_opps = triangular_strategy.find_opportunities(cex_prices)
+        if self._triangular_opps:
+            logger.info(f"[magenta]Found {len(self._triangular_opps)} Triangular Opportunities![/magenta]")
+            for opp in self._triangular_opps[:2]:
+                logger.info(f"  - {opp.exchange}: {' -> '.join(opp.symbol_path)} | Profit: {opp.expected_profit_pct:.2f}%")
+
         # Count total pairs
         self._total_pairs_checked = sum(len(sources) for sources in price_matrix.values())
         
@@ -444,7 +470,7 @@ class ArbitrageEngine:
         self._last_scan_time = datetime.now()
         
         scan_duration = (self._last_scan_time - scan_start).total_seconds()
-        logger.debug(f"Scan completed in {scan_duration:.2f}s, found {len(self._opportunities)} opportunities")
+        logger.debug(f"Scan completed in {scan_duration:.2f}s, found {len(self._opportunities)} cross-source opportunities")
         
         return self._opportunities
     
