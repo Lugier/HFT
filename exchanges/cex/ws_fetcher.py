@@ -11,6 +11,7 @@ from datetime import datetime
 from config.exchanges import EXCHANGES, ExchangeConfig
 from config.tokens import TRADING_PAIRS, normalize_symbol
 from utils.logger import get_logger
+from utils.rpc_manager import get_global_session
 
 logger = get_logger(__name__)
 
@@ -42,10 +43,12 @@ class CCXTProFetcher:
             # Limit to top-tier for best stability in WS
             if config.id in ["binance", "bybit", "okx", "gateio", "kucoin"]:
                 try:
+                    session = await get_global_session()
                     exchange_class = getattr(ccxt, config.id)
                     self._exchanges[config.id] = exchange_class({
                         'enableRateLimit': True,
-                        'options': {'defaultType': 'spot'}
+                        'options': {'defaultType': 'spot'},
+                        'session': session
                     })
                     self._latest_prices[config.id] = {}
                     logger.info(f"Initialized WebSocket for {config.name}")

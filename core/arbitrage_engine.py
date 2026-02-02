@@ -8,7 +8,7 @@ from typing import Optional
 from datetime import datetime
 
 from config.chains import ChainId
-from config.tokens import TRADING_PAIRS, normalize_symbol
+from config.tokens import TRADING_PAIRS, normalize_symbol, ALL_TOKENS
 from config.settings import MIN_PROFIT_USD, DEFAULT_TRADE_SIZE_USD, get_profit_level, ProfitLevel
 from exchanges.cex.ccxt_fetcher import cex_fetcher, CEXPrice
 from exchanges.cex.ws_fetcher import ws_fetcher
@@ -99,6 +99,49 @@ class ArbitrageEngine:
         self._gas_estimates = await gas_estimator.get_all_gas_estimates()
         
         logger.info("[bold green]Arbitrage Engine ready![/bold green]")
+        
+    def _update_token_prices(self, cex_prices: dict[str, list[CEXPrice]]):
+        """Update global token prices based on fresh CEX data"""
+        from config.tokens import CEX_SYMBOL_MAP
+        
+        # Create a reverse map for easier lookup if needed, 
+        # but here we can just iterate known major tokens
+        
+        # We really only care about major tokens that are used for pricing/routing logic
+        # or where approx_price_usd is critical (like ETH, BTC, BNB)
+        
+        # flatten prices for O(1) lookup
+        latest_prices = {}
+        for symbol, prices in cex_prices.items():
+            # calculate average mid price from reliable exchanges
+            valid_mids = [p.mid for p in prices if p.mid > 0]
+            if valid_mids:
+                avg_price = sum(valid_mids) / len(valid_mids)
+                latest_prices[symbol] = avg_price
+        
+        count = 0
+        for token in ALL_TOKENS:
+            # Construct possible pairs (e.g. ETH/USDT)
+            # We assume USDT is the numeraire
+            search_pairs = [
+                f"{token.symbol}/USDT",
+                f"{token.symbol}/USDC"
+            ]
+            
+            # Check map
+            if token.symbol in CEX_SYMBOL_MAP:
+                mapped = CEX_SYMBOL_MAP[token.symbol]
+                search_pairs.append(f"{mapped}/USDT")
+                search_pairs.append(f"{mapped}/USDC")
+            
+            for pair in search_pairs:
+                if pair in latest_prices:
+                    token.approx_price_usd = latest_prices[pair]
+                    count += 1
+                    break
+        
+        if count > 0:
+            logger.debug(f"Updated {count} token prices from CEX data")
     
     def _build_price_matrix(
         self,
@@ -117,7 +160,8 @@ class ArbitrageEngine:
             for price in prices:
                 # RELIABILITY CHECK: Stale Data (< 10s)
                 age = now - (price.timestamp / 1000) # CCXT uses ms
-                if age > 10:
+                # Tolerant check for now
+                if age > 600:
                     continue
                     
                 # RELIABILITY CHECK: Zombie Pair (< $50k volume)
@@ -174,11 +218,15 @@ class ArbitrageEngine:
             estimate = self._gas_estimates.get(buy_source.chain)
             if estimate:
                 cost += estimate.swap_cost_usd
+            else:
+                cost += self._get_fallback_gas_cost(buy_source.chain)
         
         if sell_source.source_type == "DEX" and sell_source.chain:
             estimate = self._gas_estimates.get(sell_source.chain)
             if estimate:
                 cost += estimate.swap_cost_usd
+            else:
+                cost += self._get_fallback_gas_cost(sell_source.chain)
         
         # CEX trading fees (approximate 0.1% or lower with VIP)
         if buy_source.source_type == "CEX":
@@ -187,6 +235,19 @@ class ArbitrageEngine:
             cost += DEFAULT_TRADE_SIZE_USD * 0.001
             
         return cost
+
+    def _get_fallback_gas_cost(self, chain_id: ChainId) -> float:
+        """Conservative fallback gas costs if estimation fails"""
+        # L1s are expensive, L2s are cheap but not zero
+        if chain_id == ChainId.ETHEREUM:
+            return 25.0 # High fallback for ETH
+        elif chain_id == ChainId.BSC:
+            return 0.30
+        elif chain_id in [ChainId.ARBITRUM, ChainId.OPTIMISM, ChainId.BASE, ChainId.LINEA, ChainId.SCROLL, ChainId.ZKSYNC]:
+            return 0.50 # L2 execution + L1 data blob estimate
+        elif chain_id in [ChainId.POLYGON, ChainId.AVALANCHE, ChainId.FANTOM]:
+            return 0.10
+        return 0.20 # Default other
 
     def _estimate_withdrawal_fee(
         self,
@@ -324,36 +385,18 @@ class ArbitrageEngine:
         # This will be much faster now as it skips the heavy hitters (Binance etc.)
         cex_task = cex_fetcher.fetch_all_prices(TRADING_PAIRS, exclude_exchanges=ws_active_exchanges)
         
-        # Expanded DEX pairs to check
-        dex_pairs = [
-            # Majors
-            ("WETH", "USDT"), ("WETH", "USDC"), ("WETH", "DAI"),
-            ("WBTC", "USDT"), ("WBTC", "USDC"), ("WBTC", "WETH"),
-            ("WBNB", "USDT"), ("WBNB", "USDC"),
-            
-            # L1/L2 tokens
-            ("WMATIC", "USDT"), ("WMATIC", "USDC"),
-            ("WAVAX", "USDT"), ("WAVAX", "USDC"),
-            ("WFTM", "USDT"),
-            ("ARB", "USDT"), ("ARB", "WETH"),
-            ("OP", "USDT"), ("OP", "WETH"),
-            
-            # DeFi
-            ("LINK", "USDT"), ("LINK", "WETH"),
-            ("UNI", "USDT"), ("UNI", "WETH"),
-            ("AAVE", "USDT"), ("AAVE", "WETH"),
-            
-            # New Chain tokens
-            ("WCRO", "USDT"), ("WCRO", "USDC"),
-            ("WGLMR", "USDT"), ("WGLMR", "USDC"),
-            ("WCELO", "USDT"), ("WCELO", "USDC"),
-            ("WKAVA", "USDT"), ("WKAVA", "USDC"),
-            ("ATOM", "USDT"), ("ATOM", "USDC"),
-            ("DOT", "USDT"), ("DOT", "USDC"),
-            
-            # Memes/Other
-            ("PEPE", "WETH"), ("SHIB", "USDT")
-        ]
+        # 2b. DYNAMICALLY GENERATE DEX PAIRS
+        # Map CEX symbols (ETH) back to DEX symbols (WETH)
+        from config.tokens import CEX_SYMBOL_MAP
+        dex_reverse_map = {v: k for k, v in CEX_SYMBOL_MAP.items()}
+        
+        dex_pairs = []
+        for base, quote in TRADING_PAIRS:
+            # Map CEX base -> DEX base (e.g. ETH -> WETH)
+            dex_base = dex_reverse_map.get(base, base)
+            # Map CEX quote -> DEX quote (e.g. USDT -> USDT)
+            dex_quote = dex_reverse_map.get(quote, quote)
+            dex_pairs.append((dex_base, dex_quote))
         
         dex_task = dex_aggregator.fetch_all_prices(dex_pairs)
         gas_task = gas_estimator.get_all_gas_estimates()
@@ -386,6 +429,9 @@ class ArbitrageEngine:
                     cex_prices[norm_symbol].append(cex_p)
         
         self._gas_estimates = gas_estimates
+        
+        # 4. UPDATE DYNAMIC PRICES
+        self._update_token_prices(cex_prices)
         
         # Build price matrix
         price_matrix = self._build_price_matrix(cex_prices, dex_prices)

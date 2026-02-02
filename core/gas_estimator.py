@@ -47,6 +47,7 @@ class GasEstimator:
     
     def __init__(self):
         self._native_prices: dict[str, float] = {}
+        self._gas_estimates: dict[ChainId, GasEstimate] = {} # Cache previous estimates
         self._last_update: float = 0
     
     async def _fetch_native_price(self, symbol: str) -> float:
@@ -68,20 +69,22 @@ class GasEstimator:
             pass
 
         # Robust fallbacks for all supported chains
+        # Robust fallbacks for all supported chains
         fallbacks = {
-            "ETH": 3000.0,
-            "BNB": 500.0,
-            "MATIC": 0.80,
-            "AVAX": 40.0,
-            "FTM": 0.50,
-            "ARB": 1.20,
-            "OP": 3.00,
-            "SOL": 150.0,
-            "CRO": 0.15,    # Cronos
-            "GLMR": 0.40,   # Moonbeam
-            "CELO": 0.80,   # Celo
-            "KAVA": 0.70,   # Kava
+            "ETH": 3300.0,
+            "BNB": 650.0,
+            "MATIC": 0.60,
+            "AVAX": 45.0,
+            "FTM": 0.60,
+            "ARB": 1.50,
+            "OP": 3.50,
+            "SOL": 180.0,
+            "CRO": 0.12,    # Cronos
+            "GLMR": 0.35,   # Moonbeam
+            "CELO": 0.70,   # Celo
+            "KAVA": 0.80,   # Kava
             "xDAI": 1.0,    # Gnosis (stablecoin peg)
+            "BTC": 95000.0,
         }
         return fallbacks.get(symbol, 40.0)
     
@@ -165,7 +168,12 @@ class GasEstimator:
         for (chain_id, _), estimate in zip(tasks, estimates):
             if isinstance(estimate, GasEstimate):
                 results[chain_id] = estimate
+            elif chain_id in self._gas_estimates:
+                # Keep previous estimate if new one failed
+                results[chain_id] = self._gas_estimates[chain_id]
         
+        # Save validation
+        self._gas_estimates = results
         return results
 
 

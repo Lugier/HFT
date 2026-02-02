@@ -3,6 +3,7 @@ CCXT-based centralized exchange price fetcher
 Fetches prices from multiple CEXs using public APIs (no API key required)
 """
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional
 import ccxt.async_support as ccxt
@@ -11,6 +12,7 @@ from config.exchanges import EXCHANGES, ExchangeConfig
 from config.tokens import TRADING_PAIRS, normalize_symbol
 from utils.rate_limiter import rate_limiter
 from utils.logger import get_logger
+from utils.rpc_manager import get_global_session
 
 logger = get_logger(__name__)
 
@@ -43,7 +45,7 @@ class CCXTFetcher:
     def __init__(self):
         self._exchanges: dict[str, ccxt.Exchange] = {}
         self._initialized = False
-        self._init_semaphore = asyncio.Semaphore(3)  # Lower concurrency to avoid congestion checks
+        self._init_semaphore = asyncio.Semaphore(10)  # Moderate concurrency for faster startup
     
     async def initialize(self):
         """Initialize all configured exchanges in parallel"""
@@ -62,19 +64,20 @@ class CCXTFetcher:
         """Initialize a single exchange with timeout and cleanup"""
         exchange = None
         try:
-            async with self._init_semaphore:
+                session = await get_global_session()
                 exchange_class = getattr(ccxt, config.id)
                 exchange = exchange_class({
                     'enableRateLimit': False,  # We handle rate limits globally
-                    'timeout': 15000, # Increased timeout
-                    'options': {'defaultType': 'spot'}, # Default to spot
+                    'timeout': 10000, 
+                    'options': {'defaultType': 'spot'},
+                    'session': session # Inject global session
                 })
                 
                 # Retry loop
                 for attempt in range(1, 4):
                     try:
                         # Load markets with timeout
-                        await asyncio.wait_for(exchange.load_markets(), timeout=25.0)
+                        await asyncio.wait_for(exchange.load_markets(), timeout=15.0)
                         self._exchanges[config.id] = exchange
                         logger.info(f"✓ Initialized {config.name}")
                         return # Success
@@ -154,13 +157,18 @@ class CCXTFetcher:
             if bid <= 0 or ask <= 0:
                 return None
             
+            if not ticker.get('timestamp') or ticker.get('timestamp') <= 0:
+                ts = int(time.time() * 1000)
+            else:
+                ts = ticker.get('timestamp')
+
             return CEXPrice(
                 exchange=exchange_id,
                 symbol=f"{normalize_symbol(base)}/{normalize_symbol(quote)}",
                 bid=float(bid),
                 ask=float(ask),
                 mid=(float(bid) + float(ask)) / 2,
-                timestamp=ticker.get('timestamp') or 0,
+                timestamp=ts,
                 volume_24h=ticker.get('quoteVolume')
             )
             
@@ -289,13 +297,18 @@ class CCXTFetcher:
                 if bid <= 0 or ask <= 0:
                     continue
                 
+                if not ticker.get('timestamp') or ticker.get('timestamp') <= 0:
+                    ts = int(time.time() * 1000)
+                else:
+                    ts = ticker.get('timestamp')
+
                 results[symbol] = CEXPrice(
                     exchange=exchange_id,
                     symbol=symbol,
                     bid=float(bid),
                     ask=float(ask),
                     mid=(float(bid) + float(ask)) / 2,
-                    timestamp=ticker.get('timestamp') or 0,
+                    timestamp=ts,
                     volume_24h=ticker.get('quoteVolume')
                 )
             

@@ -51,7 +51,7 @@ class DEXAggregator:
         self._v2_dexs: list[UniswapV2DEX] = []
         self._v3_dexs: list[UniswapV3DEX] = []
         self._initialized = False
-        self._semaphore = asyncio.Semaphore(100)  # Moderate concurrency for stability
+        self._semaphore = asyncio.Semaphore(25)  # Lower concurrency to prevent RPC timeouts
     
     async def initialize(self):
         """Initialize all DEX instances"""
@@ -123,10 +123,10 @@ class DEXAggregator:
                      
                 spot_task = dex.get_price(base_address, quote_address, amount_in_spot)
                 
-                # 5s timeout for DEX calls - fail fast
+                # 15s timeout for DEX calls - give public RPCs time
                 reserves, spot_price_data = await asyncio.wait_for(
                     asyncio.gather(reserves_task, spot_task, return_exceptions=True),
-                    timeout=5.0
+                    timeout=15.0
                 )
         except (asyncio.TimeoutError, Exception):
             return None
@@ -225,7 +225,8 @@ class DEXAggregator:
             quote_symbol=quote_symbol,
             bid=bid_price,
             ask=ask_price,
-            fee_percent=dex.fee_percent
+            fee_percent=dex.fee_percent,
+            timestamp=time.time()
         )
     
     async def fetch_all_prices(

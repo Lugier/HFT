@@ -141,7 +141,7 @@ WETH = Token(
     symbol="WETH",
     name="Wrapped Ether",
     decimals=18,
-    approx_price_usd=3000.0,
+    approx_price_usd=3300.0,
     addresses={
         ChainId.ETHEREUM: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         ChainId.BSC: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
@@ -162,7 +162,7 @@ WBNB = Token(
     symbol="WBNB",
     name="Wrapped BNB",
     decimals=18,
-    approx_price_usd=600.0,
+    approx_price_usd=650.0,
     addresses={
         ChainId.BSC: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         ChainId.ETHEREUM: "0x418D75f65a02b3D53B2418FB8E1fe493759c7605",
@@ -280,7 +280,7 @@ WBTC = Token(
     symbol="WBTC",
     name="Wrapped Bitcoin",
     decimals=8,
-    approx_price_usd=65000.0,
+    approx_price_usd=95000.0,
     addresses={
         ChainId.ETHEREUM: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
         ChainId.BSC: "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",

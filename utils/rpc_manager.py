@@ -9,8 +9,34 @@ from typing import Any, Callable
 from web3 import AsyncWeb3, AsyncHTTPProvider
 from web3.exceptions import Web3RPCError
 import aiohttp
-
 from config.chains import ChainId, ChainConfig, CHAINS
+
+# Global optimized session for all network requests
+_GLOBAL_SESSION: aiohttp.ClientSession | None = None
+
+async def get_global_session() -> aiohttp.ClientSession:
+    """Get or create a shared optimized session with advanced DNS caching"""
+    global _GLOBAL_SESSION
+    if _GLOBAL_SESSION is None or _GLOBAL_SESSION.closed:
+        # ADVANCED DNS OPTIMIZATION:
+        # Use a custom resolver with multiple high-speed DNS providers
+        # This prevents the local OS/Router DNS bottleneck
+        resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1", "8.8.4.4"])
+        
+        connector = aiohttp.TCPConnector(
+            use_dns_cache=True,
+            ttl_dns_cache=600,     # Cache for 10 minutes
+            limit=500,             # Increased connection limit for parallel scans
+            limit_per_host=50,     # Higher limit per node
+            enable_cleanup_closed=True,
+            resolver=resolver      # Use custom async resolver
+        )
+        
+        _GLOBAL_SESSION = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=30, connect=10)
+        )
+    return _GLOBAL_SESSION
 
 
 @dataclass
@@ -63,15 +89,17 @@ class RPCManager:
             for url in config.rpc_endpoints:
                 self._endpoint_health[chain_id][url] = RPCEndpointHealth(url=url)
     
-    def _get_web3(self, chain_id: ChainId, url: str) -> AsyncWeb3:
+    async def _get_web3(self, chain_id: ChainId, url: str) -> AsyncWeb3:
         """Get or create a Web3 instance for a specific endpoint"""
         if url not in self._web3_instances[chain_id]:
+            session = await get_global_session()
             provider = AsyncHTTPProvider(
                 url,
-                request_kwargs={
-                    "timeout": aiohttp.ClientTimeout(total=10)
-                }
+                request_kwargs={"timeout": 15},
+                # Note: Newer web3.py versions allow passing the session or use a global one
             )
+            # Inject our shared session into the provider
+            provider._request_session = session 
             self._web3_instances[chain_id][url] = AsyncWeb3(provider)
         return self._web3_instances[chain_id][url]
     
@@ -110,7 +138,7 @@ class RPCManager:
         
         for attempt in range(len(config.rpc_endpoints)):
             url = self._get_best_endpoint(chain_id)
-            web3 = self._get_web3(chain_id, url)
+            web3 = await self._get_web3(chain_id, url)
             
             start_time = time.time()
             try:
@@ -165,6 +193,12 @@ class RPCManager:
                         await w3.provider.disconnect()
                 except:
                     pass
+        
+        # Close global session
+        global _GLOBAL_SESSION
+        if _GLOBAL_SESSION and not _GLOBAL_SESSION.closed:
+            await _GLOBAL_SESSION.close()
+            _GLOBAL_SESSION = None
 
 
 # Global RPC manager instance

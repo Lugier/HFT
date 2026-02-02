@@ -37,6 +37,10 @@ class UniswapV2DEX(BaseDEX):
         self._factory_address: Optional[str] = None
         self._web3: Optional[AsyncWeb3] = None
         self._router_contract = None
+        
+        # Caches to reduce RPC calls
+        self._pair_cache: dict[str, str] = {}  # "tokenA-tokenB" -> pair_address
+        self._token0_cache: dict[str, str] = {}  # pair_address -> token0_address
     
     async def _get_web3(self) -> AsyncWeb3:
         """Get Web3 instance"""
@@ -111,26 +115,36 @@ class UniswapV2DEX(BaseDEX):
         token_a: str,
         token_b: str
     ) -> Optional[tuple[int, int]]:
-        """Get pool reserves"""
+        """Get pool reserves with caching"""
         try:
-            await rate_limiter.acquire(f"chain:{self.chain_id.name}")
-            
+            # Normalize addresses
             web3 = await self._get_web3()
-            factory_address = await self._get_factory_address()
-            
-            # Get factory contract
-            factory = web3.eth.contract(
-                address=web3.to_checksum_address(factory_address),
-                abi=UNISWAP_V2_FACTORY_ABI
-            )
-            
-            # Get pair address
             token_a = web3.to_checksum_address(token_a)
             token_b = web3.to_checksum_address(token_b)
-            pair_address = await factory.functions.getPair(token_a, token_b).call()
             
-            if pair_address == "0x0000000000000000000000000000000000000000":
-                return None
+            # 1. Check Pair Cache
+            pair_key = f"{token_a}-{token_b}"
+            pair_key_rev = f"{token_b}-{token_a}"
+            
+            if pair_key in self._pair_cache:
+                pair_address = self._pair_cache[pair_key]
+            elif pair_key_rev in self._pair_cache:
+                pair_address = self._pair_cache[pair_key_rev]
+            else:
+                # Fetch from factory
+                await rate_limiter.acquire(f"chain:{self.chain_id.name}")
+                factory_address = await self._get_factory_address()
+                factory = web3.eth.contract(
+                    address=web3.to_checksum_address(factory_address),
+                    abi=UNISWAP_V2_FACTORY_ABI
+                )
+                pair_address = await factory.functions.getPair(token_a, token_b).call()
+                
+                if pair_address == "0x0000000000000000000000000000000000000000":
+                    return None
+                
+                # Cache it
+                self._pair_cache[pair_key] = pair_address
             
             # Get pair contract
             pair = web3.eth.contract(
@@ -138,9 +152,16 @@ class UniswapV2DEX(BaseDEX):
                 abi=UNISWAP_V2_PAIR_ABI
             )
             
-            # Get reserves
+            # 2. Get Reserves (Always fresh)
+            await rate_limiter.acquire(f"chain:{self.chain_id.name}")
             reserves = await pair.functions.getReserves().call()
-            token0 = await pair.functions.token0().call()
+            
+            # 3. Check Token0 Cache
+            if pair_address in self._token0_cache:
+                token0 = self._token0_cache[pair_address]
+            else:
+                token0 = await pair.functions.token0().call()
+                self._token0_cache[pair_address] = token0
             
             # Order reserves correctly
             if token0.lower() == token_a.lower():
@@ -149,7 +170,7 @@ class UniswapV2DEX(BaseDEX):
                 return (reserves[1], reserves[0])
             
         except Exception as e:
-            logger.debug(f"Failed to get reserves: {e}")
+            logger.debug(f"Failed to get reserves for {token_a}-{token_b} on {self.name}: {e}")
             return None
     
     def _get_token_symbol(self, address: str) -> str:

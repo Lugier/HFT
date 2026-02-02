@@ -16,6 +16,7 @@ from rich.align import Align
 
 from core.arbitrage_engine import ArbitrageOpportunity, arbitrage_engine
 from config.settings import DEFAULT_TRADE_SIZE_USD, MIN_PROFIT_USD
+from utils.csv_logger import csv_logger
 
 console = Console()
 
@@ -148,6 +149,18 @@ class TerminalDashboard:
         info.append("Press Ctrl+C to exit", style="dim italic")
         
         return Panel(info, title="Info", border_style="dim")
+
+    def _create_summary_panel(self) -> Panel:
+        """Create summary of potential profits"""
+        total_profit = sum(o.net_profit_usd for o in self._opportunities if o.net_profit_usd > 0)
+        
+        text = Text()
+        text.append("💰 TOTAL POTENTIAL PROFIT: ", style="bold white")
+        text.append(f"${total_profit:,.2f}", style="bold green" if total_profit > 0 else "dim")
+        text.append("\n")
+        text.append("(Sum of all currently detected opportunities)", style="dim italic")
+        
+        return Panel(Align.center(text), border_style="green", padding=(0, 2))
     
     def _generate_display(self) -> Table:
         """Generate the full display"""
@@ -158,6 +171,7 @@ class TerminalDashboard:
         layout.add_row("")
         layout.add_row(self._create_opportunities_table())
         layout.add_row("")
+        layout.add_row(self._create_summary_panel())
         layout.add_row(self._create_info_panel())
         
         return layout
@@ -183,6 +197,9 @@ class TerminalDashboard:
         
         async def scan_callback(opportunities: list[ArbitrageOpportunity]):
             self.update(opportunities)
+            # Log deep data to CSV for analysis
+            if opportunities:
+                csv_logger.log(opportunities)
         
         async def on_scan_start():
             # Update the time so the user knows a new scan has begun
